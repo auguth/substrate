@@ -99,6 +99,7 @@ mod schedule;
 mod storage;
 mod transient_storage;
 mod wasm;
+pub mod stake;
 
 pub mod chain_extension;
 pub mod debug;
@@ -154,6 +155,8 @@ pub use weights::WeightInfo;
 
 #[cfg(doc)]
 pub use crate::wasm::api_doc;
+use stake::{DelegateRequest, ValidateRequest};
+
 
 type CodeHash<T> = <T as frame_system::Config>::Hash;
 type TrieId = BoundedVec<u8, ConstU32<128>>;
@@ -1124,6 +1127,39 @@ pub mod pallet {
 				},
 			}
 		}
+
+		#[pallet::call_index(10)]
+		#[pallet::weight(0)]
+		pub fn delegate(
+			origin: OriginFor<T>,
+			contract_addr: T::AccountId,
+			delegate_to: T::AccountId,
+		)-> DispatchResult {
+			let origin = ensure_signed(origin.clone())?;
+			<DelegateRequest<T>>::delegate(&origin,&contract_addr,&delegate_to)?;
+			Ok(())
+		}
+
+		#[pallet::call_index(11)]
+		#[pallet::weight(0)]
+		pub fn update_owner(
+			origin: OriginFor<T>,
+			contract_addr: T::AccountId,
+			new_owner: T::AccountId,
+		)-> DispatchResult {
+			let origin = ensure_signed(origin.clone())?;
+			<DelegateRequest<T>>::update_stake_owner(&origin,&contract_addr,&new_owner)?;
+			Ok(())
+		}
+
+		#[pallet::call_index(12)]
+		#[pallet::weight(0)]
+		pub fn validate(origin:OriginFor<T>) -> DispatchResult {
+			let validator = ensure_signed(origin.clone())?;
+			<ValidateRequest<T>>::validate(&validator)?;
+			Ok(())
+		}
+
 	}
 
 	#[pallet::event]
@@ -1211,14 +1247,69 @@ pub mod pallet {
 			to: T::AccountId,
 			amount: BalanceOf<T>,
 		},
+
+		/// Stake Score is updated for a contract (PoCS)
+		Staked {
+			/// The contract address for which stake information is updated
+			contract: T::AccountId,
+			/// The contract's associated stake score
+			stake_score: u128,
+		},
+
+		/// Announce a contract meets minimum reputation for staking 
+		/// Now it can call [`Pallet::delegate`], update its delegate and stake the contract
+		ReadyToStake {
+			/// The contract address which is ready for staking / delegation 
+			contract: T::AccountId
+		},
+		
+		/// Delegate Information is updated for a contract via [`Pallet::delegate`] (PoCS) 
+		Delegated {
+			/// The contract address for which delegate information is updated by its owner
+			contract: T::AccountId,
+			/// The contract delegated to which account address i.e., the validator
+			delegate_to: T::AccountId,
+		},
+
+		/// Validator validation criteria information as event (PoCS)
+		ValidateInfo {
+			/// The validator's account address i.e., a contract address
+			validator: T::AccountId,
+			/// Number of delegates which the validator can utilize for validation
+			num_delegates: u32,
+			/// Provides Assurance if the validator can start validating
+			can_validate: bool
+		},
+
+		/// Stake Owner is updated for a contract via [`Pallet::update_owner`] (PoCS) 
+		StakeOwner {
+			/// The contract address for which owner information is updated 
+			contract: T::AccountId,
+			/// The new stake owner of the contract
+			new_owner: T::AccountId,
+		},
 	}
 
 	#[pallet::error]
 	pub enum Error<T> {
+		/// Stake information for account is not available (PoCS)
+		NoStakeExists,
 		/// Invalid schedule supplied, e.g. with zero weight of a basic operation.
 		InvalidSchedule,
 		/// Invalid combination of flags supplied to `seal_call` or `seal_delegate_call`.
 		InvalidCallFlags,
+		/// The contract or account is already delegated to the same address (PoCS)
+		AlreadyDelegated,
+		/// The contract does not meet the minimum reputation requirement (PoCS)
+		LowReputation,
+		/// Invalid Owner of a contract (PoCS)
+		InvalidContractOwner,
+		/// The contract or account is already owned by the given account address (PoCS)
+		AlreadyOwner,
+		/// The required minimum number of delegates has not been met for validation (PoCS)
+		InsufficientDelegates,
+		/// No validator was found for the given contract address (PoCS)
+		NoValidatorFound,
 		/// The executed contract exhausted its gas limit.
 		OutOfGas,
 		/// The output buffer supplied to a contract API call was too small.
@@ -1361,6 +1452,27 @@ pub mod pallet {
 	pub(crate) type ContractInfoOf<T: Config> =
 		StorageMap<_, Twox64Concat, T::AccountId, ContractInfo<T>>;
 
+	// ./stake/mod.rs - structure
+	use crate::stake::{DelegateInfo,StakeInfo};
+
+	/// Tracks Delegate Information of a staked contract (PoCS)
+	#[pallet::storage]
+	#[pallet::getter(fn get_delegate_info)]
+	pub type DelegateInfoMap<T: Config> = StorageMap<_, Twox64Concat, T::AccountId, DelegateInfo<T>>;
+
+	/// Tracks Stake Score Information of a contract (PoCS)
+	#[pallet::storage]
+	#[pallet::getter(fn get_stake_info)]
+	pub type StakeInfoMap<T: Config> = StorageMap<_, Twox64Concat, T::AccountId, StakeInfo<T>>;
+
+	/// Tracks Number of delegates associated with a validator (PoCS)
+	/// 
+	/// Gets updated via [`Pallet::delegate`] extrinsic.
+	#[pallet::storage]
+	#[pallet::getter(fn get_validator_info)]
+	pub type ValidatorInfoMap<T: Config> = StorageMap<_, Twox64Concat, T::AccountId, u32>;
+
+	
 	/// Evicted contracts that await child trie deletion.
 	///
 	/// Child trie deletion is a heavy operation depending on the amount of storage items
